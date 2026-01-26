@@ -67,7 +67,6 @@ jobs:
           rustc --version
           cargo --version
           rustup target list --installed | grep wasm32-unknown-unknown || rustup target add wasm32-unknown-unknown
-          rustup target list --installed | grep wasm32v1-none || rustup target add wasm32v1-none || echo "Warning: wasm32v1-none target not available, will use wasm32-unknown-unknown fallback"
 
       - name: Build workspace (WASM)
         run: |
@@ -79,15 +78,10 @@ jobs:
           for contract in remittance_split savings_goals bill_payments insurance; do
             echo "Building contract: $contract"
             cd $contract
-            if command -v soroban &> /dev/null; then
-              soroban contract build --verbose || {
-                echo "Warning: soroban CLI build failed, using cargo directly..."
-                cargo build --release --target wasm32-unknown-unknown --verbose
-              }
-            else
-              echo "soroban CLI not available, using cargo directly..."
-              cargo build --release --target wasm32-unknown-unknown --verbose
-            fi
+            # Skip soroban CLI build as it requires wasm32v1-none which isn't available
+            # Use cargo directly with wasm32-unknown-unknown target
+            echo "Building with cargo using wasm32-unknown-unknown target..."
+            cargo build --release --target wasm32-unknown-unknown --verbose
             cd ..
           done
         continue-on-error: false

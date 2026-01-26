@@ -100,6 +100,7 @@ impl Insurance {
             next_payment_date,
         };
 
+        let policy_owner = policy.owner.clone();
         policies.set(next_id, policy);
         env.storage()
             .instance()
@@ -111,7 +112,7 @@ impl Insurance {
         // Emit event for audit trail
         env.events().publish(
             (symbol_short!("insure"), InsuranceEvent::PolicyCreated),
-            (next_id, owner),
+            (next_id, policy_owner),
         );
 
         next_id

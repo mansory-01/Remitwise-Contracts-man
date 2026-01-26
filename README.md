@@ -94,14 +94,11 @@ cd remittance_split
 cargo test
 ```
 
-## Documentation
+### USDC remittance split checks (local & CI)
 
-- **[API Reference & Usage Examples](bill_payments/README.md)** - Bill Payments Contract
-- **[API Reference & Usage Examples](insurance/README.md)** - Insurance Contract
-- **[API Reference & Usage Examples](remittance_split/README.md)** - Remittance Split Contract
-- **[API Reference & Usage Examples](savings_goals/README.md)** - Savings Goals Contract
-- **[Deployment Guide](DEPLOYMENT.md)** - Complete deployment instructions
-- **[Architecture Overview](ARCHITECTURE.md)** - System design and relationships
+- `cargo test -p remittance_split` exercises the USDC distribution logic with a mocked Stellar Asset Contract (`env.register_stellar_asset_contract_v2`) and built-in auth mocking.
+- The suite covers minting the payer account, splitting across spending/savings/bills/insurance, and asserting balances along with the new allocation metadata helper.
+- The same command is intended for CI so it runs without manual setup; re-run locally whenever split logic changes or new USDC paths are added.
 
 ## Deployment
 
