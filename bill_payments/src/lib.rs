@@ -114,6 +114,7 @@ impl BillPayments {
             paid_at: None,
         };
 
+        let bill_owner = bill.owner.clone();
         bills.set(next_id, bill);
         env.storage()
             .instance()
@@ -125,7 +126,7 @@ impl BillPayments {
         // Emit event for audit trail
         env.events().publish(
             (symbol_short!("bill"), BillEvent::Created),
-            (next_id, owner),
+            (next_id, bill_owner),
         );
 
         Ok(next_id)

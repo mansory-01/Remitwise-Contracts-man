@@ -1,5 +1,24 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, vec, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, token::TokenClient, vec, Address, Env,
+    Symbol, Vec,
+};
+
+#[derive(Clone)]
+#[contracttype]
+pub struct Allocation {
+    pub category: Symbol,
+    pub amount: i128,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct AccountGroup {
+    pub spending: Address,
+    pub savings: Address,
+    pub bills: Address,
+    pub insurance: Address,
+}
 
 // Storage TTL constants
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
@@ -233,6 +252,60 @@ impl RemittanceSplit {
         );
 
         vec![&env, spending, savings, bills, insurance]
+    }
+
+    /// Distribute USDC according to the configured split
+    pub fn distribute_usdc(
+        env: Env,
+        usdc_contract: Address,
+        from: Address,
+        accounts: AccountGroup,
+        total_amount: i128,
+    ) -> bool {
+        if total_amount <= 0 {
+            return false;
+        }
+
+        from.require_auth();
+
+        let amounts = Self::calculate_split(env.clone(), total_amount);
+        let recipients = [
+            accounts.spending,
+            accounts.savings,
+            accounts.bills,
+            accounts.insurance,
+        ];
+        let token = TokenClient::new(&env, &usdc_contract);
+
+        for (amount, recipient) in amounts.into_iter().zip(recipients.iter()) {
+            if amount > 0 {
+                token.transfer(&from, recipient, &amount);
+            }
+        }
+
+        true
+    }
+
+    /// Query USDC balance for an address
+    pub fn get_usdc_balance(env: &Env, usdc_contract: Address, account: Address) -> i128 {
+        TokenClient::new(env, &usdc_contract).balance(&account)
+    }
+
+    /// Returns a breakdown of the split by category and resulting amount
+    pub fn get_split_allocations(env: &Env, total_amount: i128) -> Vec<Allocation> {
+        let amounts = Self::calculate_split(env.clone(), total_amount);
+        let categories = [
+            symbol_short!("SPENDING"),
+            symbol_short!("SAVINGS"),
+            symbol_short!("BILLS"),
+            symbol_short!("INSURANCE"),
+        ];
+
+        let mut result = Vec::new(env);
+        for (category, amount) in categories.into_iter().zip(amounts.into_iter()) {
+            result.push_back(Allocation { category, amount });
+        }
+        result
     }
 
     /// Extend the TTL of instance storage

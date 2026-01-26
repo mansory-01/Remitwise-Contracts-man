@@ -171,6 +171,7 @@ impl SavingsGoalContract {
         goal.current_amount += amount;
         let new_amount = goal.current_amount;
         let is_completed = goal.current_amount >= goal.target_amount;
+        let goal_owner = goal.owner.clone();
 
         goals.set(goal_id, goal);
         env.storage()
@@ -180,14 +181,14 @@ impl SavingsGoalContract {
         // Emit event for audit trail
         env.events().publish(
             (symbol_short!("savings"), SavingsEvent::FundsAdded),
-            (goal_id, caller.clone(), amount),
+            (goal_id, goal_owner.clone(), amount),
         );
 
         // Emit completion event if goal is now complete
         if is_completed {
             env.events().publish(
                 (symbol_short!("savings"), SavingsEvent::GoalCompleted),
-                (goal_id, caller),
+                (goal_id, goal_owner),
             );
         }
 
