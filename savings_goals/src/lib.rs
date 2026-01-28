@@ -1,6 +1,6 @@
 #![no_std]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Symbol, Vec,
 };
 
 // Storage TTL constants
@@ -8,8 +8,11 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
 const INSTANCE_BUMP_AMOUNT: u32 = 518400; // ~30 days
 
 /// Savings goal data structure with owner tracking for access control
-#[derive(Clone)]
+#[contract]
+pub struct SavingsGoalContract;
+
 #[contracttype]
+#[derive(Clone)]
 pub struct SavingsGoal {
     pub id: u32,
     pub owner: Address,
@@ -32,11 +35,28 @@ pub enum SavingsEvent {
     GoalUnlocked,
 }
 
-#[contract]
-pub struct SavingsGoals;
-
 #[contractimpl]
-impl SavingsGoals {
+impl SavingsGoalContract {
+    // Storage keys
+    const STORAGE_NEXT_ID: Symbol = symbol_short!("NEXT_ID");
+    const STORAGE_GOALS: Symbol = symbol_short!("GOALS");
+
+    /// Initialize contract storage
+    pub fn init(env: Env) {
+        let storage = env.storage().persistent();
+
+        if storage.get::<_, u32>(&Self::STORAGE_NEXT_ID).is_none() {
+            storage.set(&Self::STORAGE_NEXT_ID, &1u32);
+        }
+
+        if storage
+            .get::<_, Map<u32, SavingsGoal>>(&Self::STORAGE_GOALS)
+            .is_none()
+        {
+            storage.set(&Self::STORAGE_GOALS, &Map::<u32, SavingsGoal>::new(&env));
+        }
+    }
+
     /// Create a new savings goal
     ///
     /// # Arguments
@@ -85,7 +105,7 @@ impl SavingsGoals {
         let goal = SavingsGoal {
             id: next_id,
             owner: owner.clone(),
-            name: name.clone(),
+            name,
             target_amount,
             current_amount: 0,
             target_date,
@@ -151,6 +171,7 @@ impl SavingsGoals {
         goal.current_amount += amount;
         let new_amount = goal.current_amount;
         let is_completed = goal.current_amount >= goal.target_amount;
+        let goal_owner = goal.owner.clone();
 
         goals.set(goal_id, goal);
         env.storage()
@@ -160,14 +181,14 @@ impl SavingsGoals {
         // Emit event for audit trail
         env.events().publish(
             (symbol_short!("savings"), SavingsEvent::FundsAdded),
-            (goal_id, caller.clone(), amount),
+            (goal_id, goal_owner.clone(), amount),
         );
 
         // Emit completion event if goal is now complete
         if is_completed {
             env.events().publish(
                 (symbol_short!("savings"), SavingsEvent::GoalCompleted),
-                (goal_id, caller),
+                (goal_id, goal_owner),
             );
         }
 
@@ -379,14 +400,15 @@ impl SavingsGoals {
     }
 
     /// Check if a goal is completed
-    ///
-    /// # Arguments
-    /// * `goal_id` - ID of the goal
-    ///
-    /// # Returns
-    /// True if current_amount >= target_amount
     pub fn is_goal_completed(env: Env, goal_id: u32) -> bool {
-        if let Some(goal) = Self::get_goal(env, goal_id) {
+        // Change .persistent() to .instance() to match add_to_goal
+        let storage = env.storage().instance();
+
+        let goals: Map<u32, SavingsGoal> = storage
+            .get(&symbol_short!("GOALS"))
+            .unwrap_or(Map::new(&env));
+
+        if let Some(goal) = goals.get(goal_id) {
             goal.current_amount >= goal.target_amount
         } else {
             false
@@ -400,3 +422,6 @@ impl SavingsGoals {
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
     }
 }
+
+#[cfg(test)]
+mod test;
