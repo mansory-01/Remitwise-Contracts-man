@@ -1,4 +1,8 @@
 #![no_std]
+
+mod events;
+use events::{RemitwiseEvents, EventCategory, EventPriority};
+
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Map, String,
     Vec,
@@ -85,21 +89,6 @@ pub struct BillPayments;
 #[contractimpl]
 impl BillPayments {
     /// Create a new bill
-    ///
-    /// # Arguments
-    /// * `owner` - Address of the bill owner (must authorize)
-    /// * `name` - Name of the bill (e.g., "Electricity", "School Fees")
-    /// * `amount` - Amount to pay (must be positive)
-    /// * `due_date` - Due date as Unix timestamp
-    /// * `recurring` - Whether this is a recurring bill
-    /// * `frequency_days` - Frequency in days for recurring bills (must be > 0 if recurring)
-    ///
-    /// # Returns
-    /// The ID of the created bill
-    ///
-    /// # Errors
-    /// * `InvalidAmount` - If amount is zero or negative
-    /// * `InvalidFrequency` - If recurring is true but frequency_days is 0
     pub fn create_bill(
         env: Env,
         owner: Address,
@@ -109,10 +98,8 @@ impl BillPayments {
         recurring: bool,
         frequency_days: u32,
     ) -> Result<u32, Error> {
-        // Access control: require owner authorization
         owner.require_auth();
 
-        // Validate inputs
         if amount <= 0 {
             return Err(Error::InvalidAmount);
         }
@@ -121,7 +108,6 @@ impl BillPayments {
             return Err(Error::InvalidFrequency);
         }
 
-        // Extend storage TTL
         Self::extend_instance_ttl(&env);
         let mut bills: Map<u32, Bill> = env
             .storage()
@@ -159,33 +145,23 @@ impl BillPayments {
             .instance()
             .set(&symbol_short!("NEXT_ID"), &next_id);
 
-        // Emit event for audit trail
-        env.events().publish(
-            (symbol_short!("bill"), BillEvent::Created),
-            (next_id, bill_owner),
+        // Standardized Creation Event
+        let event_data = (next_id, bill_owner, amount, due_date);
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::State,       // Creation is a State change
+            EventPriority::Medium,      // Standard priority
+            symbol_short!("created"),   // Action
+            event_data
         );
 
         Ok(next_id)
     }
 
     /// Mark a bill as paid
-    ///
-    /// # Arguments
-    /// * `caller` - Address of the caller (must be the bill owner)
-    /// * `bill_id` - ID of the bill
-    ///
-    /// # Returns
-    /// Ok(()) if payment was successful
-    ///
-    /// # Errors
-    /// * `BillNotFound` - If bill with given ID doesn't exist
-    /// * `BillAlreadyPaid` - If bill is already marked as paid
-    /// * `Unauthorized` - If caller is not the bill owner
     pub fn pay_bill(env: Env, caller: Address, bill_id: u32) -> Result<(), Error> {
-        // Access control: require caller authorization
         caller.require_auth();
 
-        // Extend storage TTL
         Self::extend_instance_ttl(&env);
         let mut bills: Map<u32, Bill> = env
             .storage()
@@ -195,7 +171,6 @@ impl BillPayments {
 
         let mut bill = bills.get(bill_id).ok_or(Error::BillNotFound)?;
 
-        // Access control: verify caller is the owner
         if bill.owner != caller {
             return Err(Error::Unauthorized);
         }
@@ -208,7 +183,6 @@ impl BillPayments {
         bill.paid = true;
         bill.paid_at = Some(current_time);
 
-        // If recurring, create next bill
         if bill.recurring {
             let next_due_date = bill.due_date + (bill.frequency_days as u64 * 86400);
             let next_id = env
@@ -236,25 +210,28 @@ impl BillPayments {
                 .set(&symbol_short!("NEXT_ID"), &next_id);
         }
 
+        // Capture amount before we re-insert the bill (for event data)
+        let paid_amount = bill.amount;
+
         bills.set(bill_id, bill);
         env.storage()
             .instance()
             .set(&symbol_short!("BILLS"), &bills);
 
-        // Emit event for audit trail
-        env.events()
-            .publish((symbol_short!("bill"), BillEvent::Paid), (bill_id, caller));
+        // Standardized Payment Event
+        let event_data = (bill_id, caller, paid_amount);
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::Transaction, // Money moved -> Transaction
+            EventPriority::High,        // Payment is High priority
+            symbol_short!("paid"),
+            event_data
+        );
 
         Ok(())
     }
 
     /// Get a bill by ID
-    ///
-    /// # Arguments
-    /// * `bill_id` - ID of the bill
-    ///
-    /// # Returns
-    /// Bill struct or None if not found
     pub fn get_bill(env: Env, bill_id: u32) -> Option<Bill> {
         let bills: Map<u32, Bill> = env
             .storage()
@@ -266,12 +243,6 @@ impl BillPayments {
     }
 
     /// Get all unpaid bills for a specific owner
-    ///
-    /// # Arguments
-    /// * `owner` - Address of the bill owner
-    ///
-    /// # Returns
-    /// Vec of unpaid Bill structs belonging to the owner
     pub fn get_unpaid_bills(env: Env, owner: Address) -> Vec<Bill> {
         let bills: Map<u32, Bill> = env
             .storage()
@@ -289,9 +260,6 @@ impl BillPayments {
     }
 
     /// Get all overdue unpaid bills
-    ///
-    /// # Returns
-    /// Vec of unpaid bills that are past their due date
     pub fn get_overdue_bills(env: Env) -> Vec<Bill> {
         let current_time = env.ledger().timestamp();
         let bills: Map<u32, Bill> = env
@@ -310,12 +278,6 @@ impl BillPayments {
     }
 
     /// Get total amount of unpaid bills for a specific owner
-    ///
-    /// # Arguments
-    /// * `owner` - Address of the bill owner
-    ///
-    /// # Returns
-    /// Total amount of all unpaid bills belonging to the owner
     pub fn get_total_unpaid(env: Env, owner: Address) -> i128 {
         let mut total = 0i128;
         let bills: Map<u32, Bill> = env
@@ -333,15 +295,6 @@ impl BillPayments {
     }
 
     /// Cancel/delete a bill
-    ///
-    /// # Arguments
-    /// * `bill_id` - ID of the bill to cancel
-    ///
-    /// # Returns
-    /// Ok(()) if cancellation was successful
-    ///
-    /// # Errors
-    /// * `BillNotFound` - If bill with given ID doesn't exist
     pub fn cancel_bill(env: Env, bill_id: u32) -> Result<(), Error> {
         let mut bills: Map<u32, Bill> = env
             .storage()
@@ -358,13 +311,19 @@ impl BillPayments {
             .instance()
             .set(&symbol_short!("BILLS"), &bills);
 
+        // Added Cancellation Event
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::State,
+            EventPriority::Medium,
+            symbol_short!("canceled"),
+            bill_id
+        );
+
         Ok(())
     }
 
     /// Get all bills (paid and unpaid)
-    ///
-    /// # Returns
-    /// Vec of all Bill structs
     pub fn get_all_bills(env: Env) -> Vec<Bill> {
         let bills: Map<u32, Bill> = env
             .storage()
@@ -380,14 +339,6 @@ impl BillPayments {
     }
 
     /// Archive paid bills that were paid before the specified timestamp.
-    /// Moves paid bills from active storage to archive storage.
-    ///
-    /// # Arguments
-    /// * `caller` - Address of the caller (must authorize)
-    /// * `before_timestamp` - Archive bills paid before this timestamp
-    ///
-    /// # Returns
-    /// Number of bills archived
     pub fn archive_paid_bills(env: Env, caller: Address, before_timestamp: u64) -> u32 {
         caller.require_auth();
         Self::extend_instance_ttl(&env);
@@ -442,21 +393,18 @@ impl BillPayments {
         Self::extend_archive_ttl(&env);
         Self::update_storage_stats(&env);
 
-        env.events().publish(
-            (symbol_short!("bill"), ArchiveEvent::BillsArchived),
-            (archived_count, caller),
+        // Standardized Batch Event
+        RemitwiseEvents::emit_batch(
+            &env,
+            EventCategory::System,
+            symbol_short!("archived"),
+            archived_count
         );
 
         archived_count
     }
 
     /// Get all archived bills for a specific owner
-    ///
-    /// # Arguments
-    /// * `owner` - Address of the bill owner
-    ///
-    /// # Returns
-    /// Vec of all ArchivedBill structs belonging to the owner
     pub fn get_archived_bills(env: Env, owner: Address) -> Vec<ArchivedBill> {
         let archived: Map<u32, ArchivedBill> = env
             .storage()
@@ -474,12 +422,6 @@ impl BillPayments {
     }
 
     /// Get a specific archived bill by ID
-    ///
-    /// # Arguments
-    /// * `bill_id` - ID of the archived bill
-    ///
-    /// # Returns
-    /// ArchivedBill struct or None if not found
     pub fn get_archived_bill(env: Env, bill_id: u32) -> Option<ArchivedBill> {
         let archived: Map<u32, ArchivedBill> = env
             .storage()
@@ -491,17 +433,6 @@ impl BillPayments {
     }
 
     /// Restore an archived bill back to active storage
-    ///
-    /// # Arguments
-    /// * `caller` - Address of the caller (must be the bill owner)
-    /// * `bill_id` - ID of the bill to restore
-    ///
-    /// # Returns
-    /// Ok(()) if restoration was successful
-    ///
-    /// # Errors
-    /// * `BillNotFound` - If bill is not found in archive
-    /// * `Unauthorized` - If caller is not the bill owner
     pub fn restore_bill(env: Env, caller: Address, bill_id: u32) -> Result<(), Error> {
         caller.require_auth();
         Self::extend_instance_ttl(&env);
@@ -549,22 +480,19 @@ impl BillPayments {
 
         Self::update_storage_stats(&env);
 
-        env.events().publish(
-            (symbol_short!("bill"), ArchiveEvent::BillRestored),
-            (bill_id, caller),
+        // Standardized Restoration Event
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::State,
+            EventPriority::Medium,
+            symbol_short!("restored"),
+            bill_id
         );
 
         Ok(())
     }
 
     /// Permanently delete old archives before specified timestamp
-    ///
-    /// # Arguments
-    /// * `caller` - Address of the caller (must authorize)
-    /// * `before_timestamp` - Delete archives created before this timestamp
-    ///
-    /// # Returns
-    /// Number of archives deleted
     pub fn bulk_cleanup_bills(env: Env, caller: Address, before_timestamp: u64) -> u32 {
         caller.require_auth();
         Self::extend_instance_ttl(&env);
@@ -597,18 +525,18 @@ impl BillPayments {
 
         Self::update_storage_stats(&env);
 
-        env.events().publish(
-            (symbol_short!("bill"), ArchiveEvent::ArchivesCleaned),
-            (deleted_count, caller),
+        // Standardized Batch Event
+        RemitwiseEvents::emit_batch(
+            &env,
+            EventCategory::System,
+            symbol_short!("cleaned"),
+            deleted_count
         );
 
         deleted_count
     }
 
     /// Get storage usage statistics
-    ///
-    /// # Returns
-    /// StorageStats struct with current storage metrics
     pub fn get_storage_stats(env: Env) -> StorageStats {
         env.storage()
             .instance()
