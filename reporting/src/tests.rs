@@ -651,3 +651,199 @@ fn test_health_score_no_goals() {
     // Should get default score of 20 for savings when no goals exist
     assert_eq!(health_score.savings_score, 20);
 }
+
+// ============================================
+// Storage Optimization and Archival Tests
+// ============================================
+
+#[test]
+fn test_archive_old_reports() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    // Generate and store a report
+    let total_remittance = 10000i128;
+    let period_start = 1704067200u64;
+    let period_end = 1706745600u64;
+
+    let report = client.get_financial_health_report(
+        &user,
+        &total_remittance,
+        &period_start,
+        &period_end,
+    );
+
+    let period_key = 202401u64;
+    client.store_report(&user, &report, &period_key);
+
+    // Verify report is stored
+    assert!(client.get_stored_report(&user, &period_key).is_some());
+
+    // Archive reports before far future timestamp
+    let archived_count = client.archive_old_reports(&admin, &2000000000);
+    assert_eq!(archived_count, 1);
+
+    // Verify report is no longer in active storage
+    assert!(client.get_stored_report(&user, &period_key).is_none());
+
+    // Verify report is in archive
+    let archived = client.get_archived_reports(&user);
+    assert_eq!(archived.len(), 1);
+}
+
+#[test]
+fn test_archive_empty_when_no_old_reports() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    client.init(&admin);
+
+    // Archive with no reports stored
+    let archived_count = client.archive_old_reports(&admin, &2000000000);
+    assert_eq!(archived_count, 0);
+}
+
+#[test]
+fn test_cleanup_old_reports() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    // Generate and store a report
+    let report = client.get_financial_health_report(
+        &user,
+        &10000,
+        &1704067200,
+        &1706745600,
+    );
+    client.store_report(&user, &report, &202401);
+
+    // Archive the report
+    client.archive_old_reports(&admin, &2000000000);
+    assert_eq!(client.get_archived_reports(&user).len(), 1);
+
+    // Cleanup old archives
+    let deleted = client.cleanup_old_reports(&admin, &2000000000);
+    assert_eq!(deleted, 1);
+
+    // Verify archives are gone
+    assert_eq!(client.get_archived_reports(&user).len(), 0);
+}
+
+#[test]
+fn test_storage_stats() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    // Initial stats
+    let stats = client.get_storage_stats();
+    assert_eq!(stats.active_reports, 0);
+    assert_eq!(stats.archived_reports, 0);
+
+    // Store a report
+    let report = client.get_financial_health_report(
+        &user,
+        &10000,
+        &1704067200,
+        &1706745600,
+    );
+    client.store_report(&user, &report, &202401);
+
+    // Archive and check stats
+    client.archive_old_reports(&admin, &2000000000);
+
+    let stats = client.get_storage_stats();
+    assert_eq!(stats.active_reports, 0);
+    assert_eq!(stats.archived_reports, 1);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can archive reports")]
+fn test_archive_unauthorized() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+
+    client.init(&admin);
+
+    // Non-admin tries to archive
+    client.archive_old_reports(&non_admin, &2000000000);
+}
+
+#[test]
+#[should_panic(expected = "Only admin can cleanup reports")]
+fn test_cleanup_unauthorized() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+
+    client.init(&admin);
+
+    // Non-admin tries to cleanup
+    client.cleanup_old_reports(&non_admin, &2000000000);
+}

@@ -268,3 +268,252 @@ fn test_multiple_premium_payments() {
         env.ledger().timestamp() + (30 * 86400)
     );
 }
+
+// ============================================
+// Storage Optimization and Archival Tests
+// ============================================
+
+#[test]
+fn test_archive_inactive_policies() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Insurance);
+    let client = InsuranceClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    // Create policies
+    let id1 = client.create_policy(
+        &owner,
+        &String::from_str(&env, "Policy1"),
+        &String::from_str(&env, "Health"),
+        &100,
+        &10000,
+    );
+    let id2 = client.create_policy(
+        &owner,
+        &String::from_str(&env, "Policy2"),
+        &String::from_str(&env, "Life"),
+        &200,
+        &20000,
+    );
+    // Keep one active
+    client.create_policy(
+        &owner,
+        &String::from_str(&env, "Policy3"),
+        &String::from_str(&env, "Auto"),
+        &150,
+        &15000,
+    );
+
+    // Deactivate policies 1 and 2
+    client.deactivate_policy(&owner, &id1);
+    client.deactivate_policy(&owner, &id2);
+
+    // Archive inactive policies
+    let archived_count = client.archive_inactive_policies(&owner, &3_000_000_000);
+    assert_eq!(archived_count, 2);
+
+    // Verify only active policy remains
+    let active = client.get_active_policies(&owner);
+    assert_eq!(active.len(), 1);
+
+    // Verify archived policies
+    let archived = client.get_archived_policies(&owner);
+    assert_eq!(archived.len(), 2);
+}
+
+#[test]
+fn test_archive_empty_when_all_active() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Insurance);
+    let client = InsuranceClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.create_policy(
+        &owner,
+        &String::from_str(&env, "Active1"),
+        &String::from_str(&env, "Health"),
+        &100,
+        &10000,
+    );
+    client.create_policy(
+        &owner,
+        &String::from_str(&env, "Active2"),
+        &String::from_str(&env, "Life"),
+        &200,
+        &20000,
+    );
+
+    let archived_count = client.archive_inactive_policies(&owner, &3_000_000_000);
+    assert_eq!(archived_count, 0);
+
+    assert_eq!(client.get_active_policies(&owner).len(), 2);
+    assert_eq!(client.get_archived_policies(&owner).len(), 0);
+}
+
+#[test]
+fn test_get_archived_policy() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Insurance);
+    let client = InsuranceClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let id = client.create_policy(
+        &owner,
+        &String::from_str(&env, "Archive"),
+        &String::from_str(&env, "Health"),
+        &100,
+        &5000,
+    );
+    client.deactivate_policy(&owner, &id);
+    client.archive_inactive_policies(&owner, &3_000_000_000);
+
+    let archived_policy = client.get_archived_policy(&id);
+    assert!(archived_policy.is_some());
+    let policy = archived_policy.unwrap();
+    assert_eq!(policy.id, id);
+    assert_eq!(policy.total_coverage, 5000);
+}
+
+#[test]
+fn test_restore_policy() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Insurance);
+    let client = InsuranceClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let id = client.create_policy(
+        &owner,
+        &String::from_str(&env, "Restore"),
+        &String::from_str(&env, "Life"),
+        &150,
+        &15000,
+    );
+    client.deactivate_policy(&owner, &id);
+    client.archive_inactive_policies(&owner, &3_000_000_000);
+
+    assert!(client.get_policy(&id).is_none());
+    assert!(client.get_archived_policy(&id).is_some());
+
+    let restored = client.restore_policy(&owner, &id);
+    assert!(restored);
+
+    assert!(client.get_policy(&id).is_some());
+    assert!(client.get_archived_policy(&id).is_none());
+}
+
+#[test]
+#[should_panic(expected = "Archived policy not found")]
+fn test_restore_nonexistent_policy() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Insurance);
+    let client = InsuranceClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    client.restore_policy(&owner, &999);
+}
+
+#[test]
+#[should_panic(expected = "Only the policy owner can restore this policy")]
+fn test_restore_policy_unauthorized() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Insurance);
+    let client = InsuranceClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let id = client.create_policy(
+        &owner,
+        &String::from_str(&env, "Auth"),
+        &String::from_str(&env, "Health"),
+        &100,
+        &10000,
+    );
+    client.deactivate_policy(&owner, &id);
+    client.archive_inactive_policies(&owner, &3_000_000_000);
+
+    client.restore_policy(&other, &id);
+}
+
+#[test]
+fn test_bulk_cleanup_policies() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Insurance);
+    let client = InsuranceClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let id1 = client.create_policy(
+        &owner,
+        &String::from_str(&env, "Old1"),
+        &String::from_str(&env, "Health"),
+        &100,
+        &1000,
+    );
+    let id2 = client.create_policy(
+        &owner,
+        &String::from_str(&env, "Old2"),
+        &String::from_str(&env, "Life"),
+        &200,
+        &2000,
+    );
+    client.deactivate_policy(&owner, &id1);
+    client.deactivate_policy(&owner, &id2);
+
+    client.archive_inactive_policies(&owner, &3_000_000_000);
+    assert_eq!(client.get_archived_policies(&owner).len(), 2);
+
+    let deleted = client.bulk_cleanup_policies(&owner, &1000000);
+    assert_eq!(deleted, 2);
+    assert_eq!(client.get_archived_policies(&owner).len(), 0);
+}
+
+#[test]
+fn test_storage_stats() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, Insurance);
+    let client = InsuranceClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+
+    env.mock_all_auths();
+
+    let stats = client.get_storage_stats();
+    assert_eq!(stats.active_policies, 0);
+    assert_eq!(stats.archived_policies, 0);
+
+    let id1 = client.create_policy(
+        &owner,
+        &String::from_str(&env, "P1"),
+        &String::from_str(&env, "Health"),
+        &100,
+        &10000,
+    );
+    client.create_policy(
+        &owner,
+        &String::from_str(&env, "P2"),
+        &String::from_str(&env, "Life"),
+        &200,
+        &20000,
+    );
+    client.deactivate_policy(&owner, &id1);
+
+    client.archive_inactive_policies(&owner, &3_000_000_000);
+
+    let stats = client.get_storage_stats();
+    assert_eq!(stats.active_policies, 1);
+    assert_eq!(stats.archived_policies, 1);
+    assert_eq!(stats.total_active_coverage, 20000);
+    assert_eq!(stats.total_archived_coverage, 10000);
+}

@@ -3,9 +3,13 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, Env, Map, String, Symbol, Vec,
 };
 
-// Storage TTL constants
+// Storage TTL constants for active data
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
 const INSTANCE_BUMP_AMOUNT: u32 = 518400; // ~30 days
+
+// Storage TTL constants for archived data (longer retention, less frequent access)
+const ARCHIVE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
+const ARCHIVE_BUMP_AMOUNT: u32 = 2592000; // ~180 days (6 months)
 
 /// Savings goal data structure with owner tracking for access control
 #[contract]
@@ -53,6 +57,38 @@ pub struct AuditEntry {
     pub caller: Address,
     pub timestamp: u64,
     pub success: bool,
+}
+
+/// Archived goal - compressed record with essential fields only
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedGoal {
+    pub id: u32,
+    pub owner: Address,
+    pub name: String,
+    pub target_amount: i128,
+    pub final_amount: i128,
+    pub archived_at: u64,
+}
+
+/// Storage statistics for monitoring
+#[contracttype]
+#[derive(Clone)]
+pub struct StorageStats {
+    pub active_goals: u32,
+    pub archived_goals: u32,
+    pub total_active_amount: i128,
+    pub total_archived_amount: i128,
+    pub last_updated: u64,
+}
+
+/// Events for archival operations
+#[contracttype]
+#[derive(Clone)]
+pub enum ArchiveEvent {
+    GoalsArchived,
+    GoalRestored,
+    ArchivesCleaned,
 }
 
 const SNAPSHOT_VERSION: u32 = 1;
@@ -544,6 +580,262 @@ impl SavingsGoalContract {
         out
     }
 
+    /// Archive completed goals that were completed before the specified timestamp.
+    /// Moves completed goals from active storage to archive storage.
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the caller (must authorize)
+    /// * `before_timestamp` - Archive goals completed before this timestamp
+    ///
+    /// # Returns
+    /// Number of goals archived
+    pub fn archive_completed_goals(env: Env, caller: Address, before_timestamp: u64) -> u32 {
+        caller.require_auth();
+        Self::extend_instance_ttl(&env);
+
+        let mut goals: Map<u32, SavingsGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("GOALS"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut archived: Map<u32, ArchivedGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_GOAL"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let current_time = env.ledger().timestamp();
+        let mut archived_count = 0u32;
+        let mut to_remove: Vec<u32> = Vec::new(&env);
+
+        for (id, goal) in goals.iter() {
+            // Archive if goal is completed and target_date is before the specified timestamp
+            if goal.current_amount >= goal.target_amount && goal.target_date < before_timestamp {
+                let archived_goal = ArchivedGoal {
+                    id: goal.id,
+                    owner: goal.owner.clone(),
+                    name: goal.name.clone(),
+                    target_amount: goal.target_amount,
+                    final_amount: goal.current_amount,
+                    archived_at: current_time,
+                };
+                archived.set(id, archived_goal);
+                to_remove.push_back(id);
+                archived_count += 1;
+            }
+        }
+
+        // Remove archived goals from active storage
+        for i in 0..to_remove.len() {
+            if let Some(id) = to_remove.get(i) {
+                goals.remove(id);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("GOALS"), &goals);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_GOAL"), &archived);
+
+        // Extend archive TTL with longer duration
+        Self::extend_archive_ttl(&env);
+
+        // Update storage stats
+        Self::update_storage_stats(&env);
+
+        Self::append_audit(&env, symbol_short!("archive"), &caller, true);
+        env.events().publish(
+            (symbol_short!("savings"), ArchiveEvent::GoalsArchived),
+            (archived_count, caller),
+        );
+
+        archived_count
+    }
+
+    /// Get all archived goals for a specific owner
+    ///
+    /// # Arguments
+    /// * `owner` - Address of the goal owner
+    ///
+    /// # Returns
+    /// Vec of all ArchivedGoal structs belonging to the owner
+    pub fn get_archived_goals(env: Env, owner: Address) -> Vec<ArchivedGoal> {
+        let archived: Map<u32, ArchivedGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_GOAL"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut result = Vec::new(&env);
+        for (_, goal) in archived.iter() {
+            if goal.owner == owner {
+                result.push_back(goal);
+            }
+        }
+        result
+    }
+
+    /// Get a specific archived goal by ID
+    ///
+    /// # Arguments
+    /// * `goal_id` - ID of the archived goal
+    ///
+    /// # Returns
+    /// ArchivedGoal struct or None if not found
+    pub fn get_archived_goal(env: Env, goal_id: u32) -> Option<ArchivedGoal> {
+        let archived: Map<u32, ArchivedGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_GOAL"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        archived.get(goal_id)
+    }
+
+    /// Restore an archived goal back to active storage
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the caller (must be the goal owner)
+    /// * `goal_id` - ID of the goal to restore
+    ///
+    /// # Returns
+    /// True if restoration was successful
+    ///
+    /// # Panics
+    /// - If caller is not the goal owner
+    /// - If goal is not found in archive
+    pub fn restore_goal(env: Env, caller: Address, goal_id: u32) -> bool {
+        caller.require_auth();
+        Self::extend_instance_ttl(&env);
+
+        let mut archived: Map<u32, ArchivedGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_GOAL"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let archived_goal = match archived.get(goal_id) {
+            Some(g) => g,
+            None => {
+                Self::append_audit(&env, symbol_short!("restore"), &caller, false);
+                panic!("Archived goal not found");
+            }
+        };
+
+        if archived_goal.owner != caller {
+            Self::append_audit(&env, symbol_short!("restore"), &caller, false);
+            panic!("Only the goal owner can restore this goal");
+        }
+
+        let mut goals: Map<u32, SavingsGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("GOALS"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        // Restore as a new active goal
+        let restored_goal = SavingsGoal {
+            id: archived_goal.id,
+            owner: archived_goal.owner.clone(),
+            name: archived_goal.name.clone(),
+            target_amount: archived_goal.target_amount,
+            current_amount: archived_goal.final_amount,
+            target_date: env.ledger().timestamp() + 31536000, // Set new target 1 year from now
+            locked: true,
+        };
+
+        goals.set(goal_id, restored_goal);
+        archived.remove(goal_id);
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("GOALS"), &goals);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_GOAL"), &archived);
+
+        // Update storage stats
+        Self::update_storage_stats(&env);
+
+        Self::append_audit(&env, symbol_short!("restore"), &caller, true);
+        env.events().publish(
+            (symbol_short!("savings"), ArchiveEvent::GoalRestored),
+            (goal_id, caller),
+        );
+
+        true
+    }
+
+    /// Permanently delete old archives before specified timestamp
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the caller (must authorize)
+    /// * `before_timestamp` - Delete archives created before this timestamp
+    ///
+    /// # Returns
+    /// Number of archives deleted
+    pub fn cleanup_old_archives(env: Env, caller: Address, before_timestamp: u64) -> u32 {
+        caller.require_auth();
+        Self::extend_instance_ttl(&env);
+
+        let mut archived: Map<u32, ArchivedGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_GOAL"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut deleted_count = 0u32;
+        let mut to_remove: Vec<u32> = Vec::new(&env);
+
+        for (id, goal) in archived.iter() {
+            if goal.archived_at < before_timestamp {
+                to_remove.push_back(id);
+                deleted_count += 1;
+            }
+        }
+
+        for i in 0..to_remove.len() {
+            if let Some(id) = to_remove.get(i) {
+                archived.remove(id);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_GOAL"), &archived);
+
+        // Update storage stats
+        Self::update_storage_stats(&env);
+
+        Self::append_audit(&env, symbol_short!("cleanup"), &caller, true);
+        env.events().publish(
+            (symbol_short!("savings"), ArchiveEvent::ArchivesCleaned),
+            (deleted_count, caller),
+        );
+
+        deleted_count
+    }
+
+    /// Get storage usage statistics
+    ///
+    /// # Returns
+    /// StorageStats struct with current storage metrics
+    pub fn get_storage_stats(env: Env) -> StorageStats {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("STOR_STAT"))
+            .unwrap_or(StorageStats {
+                active_goals: 0,
+                archived_goals: 0,
+                total_active_amount: 0,
+                total_archived_amount: 0,
+                last_updated: 0,
+            })
+    }
+
     fn require_nonce(env: &Env, address: &Address, expected: u64) {
         let current = Self::get_nonce(env.clone(), address.clone());
         if expected != current {
@@ -608,6 +900,54 @@ impl SavingsGoalContract {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Extend the TTL of archive storage with longer duration
+    fn extend_archive_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(ARCHIVE_LIFETIME_THRESHOLD, ARCHIVE_BUMP_AMOUNT);
+    }
+
+    /// Update storage statistics
+    fn update_storage_stats(env: &Env) {
+        let goals: Map<u32, SavingsGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("GOALS"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let archived: Map<u32, ArchivedGoal> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_GOAL"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let mut active_count = 0u32;
+        let mut active_amount = 0i128;
+        for (_, goal) in goals.iter() {
+            active_count += 1;
+            active_amount = active_amount.saturating_add(goal.current_amount);
+        }
+
+        let mut archived_count = 0u32;
+        let mut archived_amount = 0i128;
+        for (_, goal) in archived.iter() {
+            archived_count += 1;
+            archived_amount = archived_amount.saturating_add(goal.final_amount);
+        }
+
+        let stats = StorageStats {
+            active_goals: active_count,
+            archived_goals: archived_count,
+            total_active_amount: active_amount,
+            total_archived_amount: archived_amount,
+            last_updated: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("STOR_STAT"), &stats);
     }
 }
 

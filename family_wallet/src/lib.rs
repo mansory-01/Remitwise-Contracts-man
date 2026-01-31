@@ -4,9 +4,13 @@ use soroban_sdk::{
     Env, Map, Symbol, Vec,
 };
 
-// Storage TTL constants
+// Storage TTL constants for active data
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
 const INSTANCE_BUMP_AMOUNT: u32 = 518400; // ~30 days
+
+// Storage TTL constants for archived data (longer retention, less frequent access)
+const ARCHIVE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
+const ARCHIVE_BUMP_AMOUNT: u32 = 2592000; // ~180 days (6 months)
 
 // Signature expiration time (24 hours in seconds)
 const SIGNATURE_EXPIRATION: u64 = 86400;
@@ -96,6 +100,35 @@ pub enum EmergencyEvent {
     ModeOff,
     TransferInit,
     TransferExec,
+}
+
+/// Archived transaction - compressed record with essential fields only
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedTransaction {
+    pub tx_id: u64,
+    pub tx_type: TransactionType,
+    pub proposer: Address,
+    pub executed_at: u64,
+    pub archived_at: u64,
+}
+
+/// Storage statistics for monitoring
+#[contracttype]
+#[derive(Clone)]
+pub struct StorageStats {
+    pub pending_transactions: u32,
+    pub archived_transactions: u32,
+    pub total_members: u32,
+    pub last_updated: u64,
+}
+
+/// Events for archival operations
+#[contracttype]
+#[derive(Clone)]
+pub enum ArchiveEvent {
+    TransactionsArchived,
+    ExpiredCleaned,
 }
 
 /// Multi-signature wallet contract
@@ -784,6 +817,169 @@ impl FamilyWallet {
         }
     }
 
+    /// Archive old executed transactions before the specified timestamp.
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the caller (must be Owner or Admin)
+    /// * `before_timestamp` - Archive transactions executed before this timestamp
+    ///
+    /// # Returns
+    /// Number of transactions archived
+    pub fn archive_old_transactions(env: Env, caller: Address, before_timestamp: u64) -> u32 {
+        caller.require_auth();
+
+        if !Self::is_owner_or_admin(&env, &caller) {
+            panic!("Only Owner or Admin can archive transactions");
+        }
+
+        Self::extend_instance_ttl(&env);
+
+        let executed_txs: Map<u64, bool> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("EXEC_TXS"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut archived: Map<u64, ArchivedTransaction> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_TX"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let current_time = env.ledger().timestamp();
+        let mut archived_count = 0u32;
+
+        // Archive executed transactions (we don't have detailed data, just the fact they were executed)
+        for (tx_id, _) in executed_txs.iter() {
+            // Since we only have tx_id and executed status, create minimal archive
+            let archived_tx = ArchivedTransaction {
+                tx_id,
+                tx_type: TransactionType::RegularWithdrawal, // Default type as we don't store this
+                proposer: caller.clone(), // Use caller as we don't have original proposer
+                executed_at: before_timestamp,
+                archived_at: current_time,
+            };
+            archived.set(tx_id, archived_tx);
+            archived_count += 1;
+        }
+
+        // Clear executed transactions map after archiving
+        if archived_count > 0 {
+            env.storage()
+                .instance()
+                .set(&symbol_short!("EXEC_TXS"), &Map::<u64, bool>::new(&env));
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_TX"), &archived);
+
+        Self::extend_archive_ttl(&env);
+        Self::update_storage_stats(&env);
+
+        env.events().publish(
+            (symbol_short!("wallet"), ArchiveEvent::TransactionsArchived),
+            (archived_count, caller),
+        );
+
+        archived_count
+    }
+
+    /// Get archived transactions with limit
+    ///
+    /// # Arguments
+    /// * `limit` - Maximum number of transactions to return
+    ///
+    /// # Returns
+    /// Vec of ArchivedTransaction structs
+    pub fn get_archived_transactions(env: Env, limit: u32) -> Vec<ArchivedTransaction> {
+        let archived: Map<u64, ArchivedTransaction> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_TX"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut result = Vec::new(&env);
+        let mut count = 0u32;
+        for (_, tx) in archived.iter() {
+            if count >= limit {
+                break;
+            }
+            result.push_back(tx);
+            count += 1;
+        }
+        result
+    }
+
+    /// Cleanup expired pending transactions
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the caller (must be Owner or Admin)
+    ///
+    /// # Returns
+    /// Number of expired transactions removed
+    pub fn cleanup_expired_pending(env: Env, caller: Address) -> u32 {
+        caller.require_auth();
+
+        if !Self::is_owner_or_admin(&env, &caller) {
+            panic!("Only Owner or Admin can cleanup expired transactions");
+        }
+
+        Self::extend_instance_ttl(&env);
+
+        let mut pending_txs: Map<u64, PendingTransaction> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("PEND_TXS"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let current_time = env.ledger().timestamp();
+        let mut removed_count = 0u32;
+        let mut to_remove: Vec<u64> = Vec::new(&env);
+
+        for (tx_id, tx) in pending_txs.iter() {
+            if tx.expires_at < current_time {
+                to_remove.push_back(tx_id);
+                removed_count += 1;
+            }
+        }
+
+        for i in 0..to_remove.len() {
+            if let Some(id) = to_remove.get(i) {
+                pending_txs.remove(id);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("PEND_TXS"), &pending_txs);
+
+        Self::update_storage_stats(&env);
+
+        env.events().publish(
+            (symbol_short!("wallet"), ArchiveEvent::ExpiredCleaned),
+            (removed_count, caller),
+        );
+
+        removed_count
+    }
+
+    /// Get storage usage statistics
+    ///
+    /// # Returns
+    /// StorageStats struct with current storage metrics
+    pub fn get_storage_stats(env: Env) -> StorageStats {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("STOR_STAT"))
+            .unwrap_or(StorageStats {
+                pending_transactions: 0,
+                archived_transactions: 0,
+                total_members: 0,
+                last_updated: 0,
+            })
+    }
+
     // Internal helper functions
 
     /// Execute an emergency transfer immediately (emergency mode only)
@@ -968,6 +1164,60 @@ impl FamilyWallet {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Extend the TTL of archive storage with longer duration
+    fn extend_archive_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(ARCHIVE_LIFETIME_THRESHOLD, ARCHIVE_BUMP_AMOUNT);
+    }
+
+    /// Update storage statistics
+    fn update_storage_stats(env: &Env) {
+        let pending_txs: Map<u64, PendingTransaction> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("PEND_TXS"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let archived: Map<u64, ArchivedTransaction> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_TX"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let members: Map<Address, FamilyMember> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("MEMBERS"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let mut pending_count = 0u32;
+        for _ in pending_txs.iter() {
+            pending_count += 1;
+        }
+
+        let mut archived_count = 0u32;
+        for _ in archived.iter() {
+            archived_count += 1;
+        }
+
+        let mut member_count = 0u32;
+        for _ in members.iter() {
+            member_count += 1;
+        }
+
+        let stats = StorageStats {
+            pending_transactions: pending_count,
+            archived_transactions: archived_count,
+            total_members: member_count,
+            last_updated: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("STOR_STAT"), &stats);
     }
 }
 

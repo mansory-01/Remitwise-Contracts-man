@@ -521,4 +521,264 @@ mod testsuit {
         let next_bill = client.get_bill(&2).unwrap();
         assert_eq!(next_bill.due_date, 1000000 + 86400); // Exactly 1 day later
     }
+
+    // ============================================
+    // Storage Optimization and Archival Tests
+    // ============================================
+
+    #[test]
+    fn test_archive_paid_bills() {
+        let env = Env::default();
+        set_time(&env, 2_000_000);
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+
+        // Create and pay bills
+        let id1 = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Bill1"),
+            &100,
+            &1000000,
+            &false,
+            &0,
+        );
+        let id2 = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Bill2"),
+            &200,
+            &1000000,
+            &false,
+            &0,
+        );
+        // Create unpaid bill
+        client.create_bill(
+            &owner,
+            &String::from_str(&env, "Bill3"),
+            &300,
+            &3000000,
+            &false,
+            &0,
+        );
+
+        client.pay_bill(&owner, &id1);
+        client.pay_bill(&owner, &id2);
+
+        // Archive paid bills
+        let archived_count = client.archive_paid_bills(&owner, &3_000_000);
+        assert_eq!(archived_count, 2);
+
+        // Verify only unpaid bill remains active
+        let all_bills = client.get_all_bills();
+        assert_eq!(all_bills.len(), 1);
+
+        // Verify archived bills
+        let archived = client.get_archived_bills(&owner);
+        assert_eq!(archived.len(), 2);
+    }
+
+    #[test]
+    fn test_archive_empty_when_no_paid_bills() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+
+        client.create_bill(
+            &owner,
+            &String::from_str(&env, "Unpaid1"),
+            &100,
+            &1000000,
+            &false,
+            &0,
+        );
+        client.create_bill(
+            &owner,
+            &String::from_str(&env, "Unpaid2"),
+            &200,
+            &1000000,
+            &false,
+            &0,
+        );
+
+        let archived_count = client.archive_paid_bills(&owner, &2_000_000);
+        assert_eq!(archived_count, 0);
+
+        assert_eq!(client.get_all_bills().len(), 2);
+        assert_eq!(client.get_archived_bills(&owner).len(), 0);
+    }
+
+    #[test]
+    fn test_get_archived_bill() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+
+        let id = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Archive"),
+            &500,
+            &1000000,
+            &false,
+            &0,
+        );
+        client.pay_bill(&owner, &id);
+        client.archive_paid_bills(&owner, &2_000_000);
+
+        let archived_bill = client.get_archived_bill(&id);
+        assert!(archived_bill.is_some());
+        let bill = archived_bill.unwrap();
+        assert_eq!(bill.id, id);
+        assert_eq!(bill.amount, 500);
+    }
+
+    #[test]
+    fn test_restore_bill() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+
+        let id = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Restore"),
+            &750,
+            &1000000,
+            &false,
+            &0,
+        );
+        client.pay_bill(&owner, &id);
+        client.archive_paid_bills(&owner, &2_000_000);
+
+        assert!(client.get_bill(&id).is_none());
+        assert!(client.get_archived_bill(&id).is_some());
+
+        client.restore_bill(&owner, &id);
+
+        assert!(client.get_bill(&id).is_some());
+        assert!(client.get_archived_bill(&id).is_none());
+    }
+
+    #[test]
+    fn test_restore_bill_not_found() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+
+        let result = client.try_restore_bill(&owner, &999);
+        assert_eq!(result, Err(Ok(Error::BillNotFound)));
+    }
+
+    #[test]
+    fn test_restore_bill_unauthorized() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+        let other = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+
+        let id = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Auth"),
+            &100,
+            &1000000,
+            &false,
+            &0,
+        );
+        client.pay_bill(&owner, &id);
+        client.archive_paid_bills(&owner, &2_000_000);
+
+        let result = client.try_restore_bill(&other, &id);
+        assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    }
+
+    #[test]
+    fn test_bulk_cleanup_bills() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+
+        let id1 = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Old1"),
+            &100,
+            &1000,
+            &false,
+            &0,
+        );
+        let id2 = client.create_bill(
+            &owner,
+            &String::from_str(&env, "Old2"),
+            &200,
+            &1000,
+            &false,
+            &0,
+        );
+        client.pay_bill(&owner, &id1);
+        client.pay_bill(&owner, &id2);
+
+        client.archive_paid_bills(&owner, &2000);
+        assert_eq!(client.get_archived_bills(&owner).len(), 2);
+
+        let deleted = client.bulk_cleanup_bills(&owner, &1000000);
+        assert_eq!(deleted, 2);
+        assert_eq!(client.get_archived_bills(&owner).len(), 0);
+    }
+
+    #[test]
+    fn test_storage_stats() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &contract_id);
+        let owner = <soroban_sdk::Address as AddressTrait>::generate(&env);
+
+        env.mock_all_auths();
+
+        let stats = client.get_storage_stats();
+        assert_eq!(stats.active_bills, 0);
+        assert_eq!(stats.archived_bills, 0);
+
+        let id1 = client.create_bill(
+            &owner,
+            &String::from_str(&env, "B1"),
+            &100,
+            &1000,
+            &false,
+            &0,
+        );
+        client.create_bill(
+            &owner,
+            &String::from_str(&env, "B2"),
+            &200,
+            &1000,
+            &false,
+            &0,
+        );
+        client.pay_bill(&owner, &id1);
+
+        client.archive_paid_bills(&owner, &2000);
+
+        let stats = client.get_storage_stats();
+        assert_eq!(stats.active_bills, 1);
+        assert_eq!(stats.archived_bills, 1);
+        assert_eq!(stats.total_unpaid_amount, 200);
+        assert_eq!(stats.total_archived_amount, 100);
+    }
 }

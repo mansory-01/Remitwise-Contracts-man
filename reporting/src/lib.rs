@@ -4,9 +4,13 @@ use soroban_sdk::{
     Vec,
 };
 
-// Storage TTL constants
+// Storage TTL constants for active data
 const INSTANCE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
 const INSTANCE_BUMP_AMOUNT: u32 = 518400; // ~30 days
+
+// Storage TTL constants for archived data (longer retention, less frequent access)
+const ARCHIVE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
+const ARCHIVE_BUMP_AMOUNT: u32 = 2592000; // ~180 days (6 months)
 
 /// Category for financial breakdown
 #[contracttype]
@@ -142,6 +146,28 @@ pub enum ReportEvent {
     ReportGenerated,
     ReportStored,
     AddressesConfigured,
+    ReportsArchived,
+    ArchivesCleaned,
+}
+
+/// Archived report - compressed summary
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedReport {
+    pub user: Address,
+    pub period_key: u64,
+    pub health_score: u32,
+    pub generated_at: u64,
+    pub archived_at: u64,
+}
+
+/// Storage statistics for monitoring
+#[contracttype]
+#[derive(Clone)]
+pub struct StorageStats {
+    pub active_reports: u32,
+    pub archived_reports: u32,
+    pub last_updated: u64,
 }
 
 // Client traits for cross-contract calls
@@ -659,10 +685,227 @@ impl ReportingContract {
         env.storage().instance().get(&symbol_short!("ADMIN"))
     }
 
+    /// Archive old reports before the specified timestamp
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the caller (must be admin)
+    /// * `before_timestamp` - Archive reports generated before this timestamp
+    ///
+    /// # Returns
+    /// Number of reports archived
+    pub fn archive_old_reports(env: Env, caller: Address, before_timestamp: u64) -> u32 {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ADMIN"))
+            .expect("Contract not initialized");
+
+        if caller != admin {
+            panic!("Only admin can archive reports");
+        }
+
+        Self::extend_instance_ttl(&env);
+
+        let mut reports: Map<(Address, u64), FinancialHealthReport> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("REPORTS"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut archived: Map<(Address, u64), ArchivedReport> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_RPT"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let current_time = env.ledger().timestamp();
+        let mut archived_count = 0u32;
+        let mut to_remove: Vec<(Address, u64)> = Vec::new(&env);
+
+        for ((user, period_key), report) in reports.iter() {
+            if report.generated_at < before_timestamp {
+                let archived_report = ArchivedReport {
+                    user: user.clone(),
+                    period_key,
+                    health_score: report.health_score.score,
+                    generated_at: report.generated_at,
+                    archived_at: current_time,
+                };
+                archived.set((user.clone(), period_key), archived_report);
+                to_remove.push_back((user, period_key));
+                archived_count += 1;
+            }
+        }
+
+        for i in 0..to_remove.len() {
+            if let Some(key) = to_remove.get(i) {
+                reports.remove(key);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("REPORTS"), &reports);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_RPT"), &archived);
+
+        Self::extend_archive_ttl(&env);
+        Self::update_storage_stats(&env);
+
+        env.events().publish(
+            (symbol_short!("report"), ReportEvent::ReportsArchived),
+            (archived_count, caller),
+        );
+
+        archived_count
+    }
+
+    /// Get archived reports for a user
+    ///
+    /// # Arguments
+    /// * `user` - Address of the user
+    ///
+    /// # Returns
+    /// Vec of ArchivedReport structs
+    pub fn get_archived_reports(env: Env, user: Address) -> Vec<ArchivedReport> {
+        let archived: Map<(Address, u64), ArchivedReport> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_RPT"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut result = Vec::new(&env);
+        for ((addr, _), report) in archived.iter() {
+            if addr == user {
+                result.push_back(report);
+            }
+        }
+        result
+    }
+
+    /// Permanently delete old archives before specified timestamp
+    ///
+    /// # Arguments
+    /// * `caller` - Address of the caller (must be admin)
+    /// * `before_timestamp` - Delete archives created before this timestamp
+    ///
+    /// # Returns
+    /// Number of archives deleted
+    pub fn cleanup_old_reports(env: Env, caller: Address, before_timestamp: u64) -> u32 {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ADMIN"))
+            .expect("Contract not initialized");
+
+        if caller != admin {
+            panic!("Only admin can cleanup reports");
+        }
+
+        Self::extend_instance_ttl(&env);
+
+        let mut archived: Map<(Address, u64), ArchivedReport> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_RPT"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut deleted_count = 0u32;
+        let mut to_remove: Vec<(Address, u64)> = Vec::new(&env);
+
+        for ((user, period_key), report) in archived.iter() {
+            if report.archived_at < before_timestamp {
+                to_remove.push_back((user, period_key));
+                deleted_count += 1;
+            }
+        }
+
+        for i in 0..to_remove.len() {
+            if let Some(key) = to_remove.get(i) {
+                archived.remove(key);
+            }
+        }
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_RPT"), &archived);
+
+        Self::update_storage_stats(&env);
+
+        env.events().publish(
+            (symbol_short!("report"), ReportEvent::ArchivesCleaned),
+            (deleted_count, caller),
+        );
+
+        deleted_count
+    }
+
+    /// Get storage usage statistics
+    ///
+    /// # Returns
+    /// StorageStats struct with current storage metrics
+    pub fn get_storage_stats(env: Env) -> StorageStats {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("STOR_STAT"))
+            .unwrap_or(StorageStats {
+                active_reports: 0,
+                archived_reports: 0,
+                last_updated: 0,
+            })
+    }
+
     fn extend_instance_ttl(env: &Env) {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    }
+
+    /// Extend the TTL of archive storage with longer duration
+    fn extend_archive_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(ARCHIVE_LIFETIME_THRESHOLD, ARCHIVE_BUMP_AMOUNT);
+    }
+
+    /// Update storage statistics
+    fn update_storage_stats(env: &Env) {
+        let reports: Map<(Address, u64), FinancialHealthReport> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("REPORTS"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let archived: Map<(Address, u64), ArchivedReport> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_RPT"))
+            .unwrap_or_else(|| Map::new(env));
+
+        let mut active_count = 0u32;
+        for _ in reports.iter() {
+            active_count += 1;
+        }
+
+        let mut archived_count = 0u32;
+        for _ in archived.iter() {
+            archived_count += 1;
+        }
+
+        let stats = StorageStats {
+            active_reports: active_count,
+            archived_reports: archived_count,
+            last_updated: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .instance()
+            .set(&symbol_short!("STOR_STAT"), &stats);
     }
 }
 

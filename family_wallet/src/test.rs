@@ -1,6 +1,6 @@
 use super::*;
 use soroban_sdk::{
-    testutils::Address as _,
+    testutils::{Address as _, Ledger},
     token::{StellarAssetClient, TokenClient},
     vec, Env,
 };
@@ -737,4 +737,141 @@ fn test_unauthorized_signer() {
 
     // Try to sign with member2 (not authorized) - should fail
     client.sign_transaction(&member2, &tx_id);
+}
+
+// ============================================
+// Storage Optimization and Archival Tests
+// ============================================
+
+#[test]
+fn test_archive_old_transactions() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone()];
+
+    client.init(&owner, &initial_members);
+
+    // Archive (even with no transactions, should work)
+    let archived_count = client.archive_old_transactions(&owner, &1_000_000);
+    assert_eq!(archived_count, 0);
+
+    // Check archived transactions
+    let archived = client.get_archived_transactions(&10);
+    assert_eq!(archived.len(), 0);
+}
+
+#[test]
+fn test_cleanup_expired_pending() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let member2 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone(), member2.clone()];
+
+    client.init(&owner, &initial_members);
+
+    // Setup token
+    let token_admin = Address::generate(&env);
+    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &5000_0000000);
+
+    // Configure multi-sig
+    let signers = vec![&env, owner.clone(), member1.clone(), member2.clone()];
+    client.configure_multisig(
+        &owner,
+        &TransactionType::LargeWithdrawal,
+        &2,
+        &signers,
+        &1000_0000000,
+    );
+
+    // Propose a withdrawal (creates pending transaction)
+    let recipient = Address::generate(&env);
+    let tx_id = client.withdraw(&owner, &token_contract.address(), &recipient, &2000_0000000);
+    assert!(tx_id > 0);
+
+    // Verify pending transaction exists
+    let pending = client.get_pending_transaction(&tx_id);
+    assert!(pending.is_some());
+
+    // Advance time past expiration (24 hours = 86400 seconds)
+    let mut ledger = env.ledger().get();
+    ledger.timestamp += 86401;
+    env.ledger().set(ledger);
+
+    // Cleanup expired
+    let removed = client.cleanup_expired_pending(&owner);
+    assert_eq!(removed, 1);
+
+    // Verify pending transaction is gone
+    let pending_after = client.get_pending_transaction(&tx_id);
+    assert!(pending_after.is_none());
+}
+
+#[test]
+fn test_storage_stats() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let member2 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone(), member2.clone()];
+
+    client.init(&owner, &initial_members);
+
+    // Update stats by calling archive
+    client.archive_old_transactions(&owner, &1_000_000);
+
+    let stats = client.get_storage_stats();
+    assert_eq!(stats.total_members, 3); // owner + 2 members
+    assert_eq!(stats.pending_transactions, 0);
+    assert_eq!(stats.archived_transactions, 0);
+}
+
+#[test]
+#[should_panic(expected = "Only Owner or Admin can archive transactions")]
+fn test_archive_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone()];
+
+    client.init(&owner, &initial_members);
+
+    // Member (not owner/admin) tries to archive
+    client.archive_old_transactions(&member1, &1_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Only Owner or Admin can cleanup expired transactions")]
+fn test_cleanup_unauthorized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone()];
+
+    client.init(&owner, &initial_members);
+
+    // Member (not owner/admin) tries to cleanup
+    client.cleanup_expired_pending(&member1);
 }

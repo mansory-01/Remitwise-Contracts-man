@@ -51,6 +51,11 @@ Manages goal-based savings with target dates.
 - `add_to_goal`: Add funds to a goal
 - `get_goal`: Get goal details
 - `is_goal_completed`: Check if goal target is reached
+- `archive_completed_goals`: Archive completed goals to reduce storage
+- `get_archived_goals`: Query archived goals
+- `restore_goal`: Restore archived goal to active storage
+- `cleanup_old_archives`: Permanently delete old archives
+- `get_storage_stats`: Get storage usage statistics
 
 ### Bill Payments
 
@@ -62,6 +67,11 @@ Tracks and manages bill payments with recurring support.
 - `pay_bill`: Mark a bill as paid and create next recurring bill if applicable
 - `get_unpaid_bills`: Get all unpaid bills
 - `get_total_unpaid`: Get total amount of unpaid bills
+- `archive_paid_bills`: Archive paid bills to reduce storage
+- `get_archived_bills`: Query archived bills
+- `restore_bill`: Restore archived bill to active storage
+- `bulk_cleanup_bills`: Permanently delete old archives
+- `get_storage_stats`: Get storage usage statistics
 
 ### Insurance
 
@@ -73,6 +83,11 @@ Manages micro-insurance policies and premium payments.
 - `pay_premium`: Pay monthly premium
 - `get_active_policies`: Get all active policies
 - `get_total_monthly_premium`: Calculate total monthly premium cost
+- `archive_inactive_policies`: Archive deactivated policies to reduce storage
+- `get_archived_policies`: Query archived policies
+- `restore_policy`: Restore archived policy to active storage
+- `bulk_cleanup_policies`: Permanently delete old archives
+- `get_storage_stats`: Get storage usage statistics
 
 ### Family Wallet
 
@@ -84,6 +99,10 @@ Manages family members, roles, and spending limits.
 - `get_member`: Get member details
 - `update_spending_limit`: Update spending limit for a member
 - `check_spending_limit`: Verify if spending is within limit
+- `archive_old_transactions`: Archive executed transactions to reduce storage
+- `get_archived_transactions`: Query archived transactions
+- `cleanup_expired_pending`: Remove expired pending transactions
+- `get_storage_stats`: Get storage usage statistics
 
 ### Reporting
 
@@ -100,6 +119,10 @@ Aggregates data from all contracts to generate comprehensive financial reports.
 - `get_trend_analysis`: Compare period-over-period trends
 - `store_report`: Store report for future reference
 - `get_stored_report`: Retrieve previously stored report
+- `archive_old_reports`: Archive old reports to reduce storage
+- `get_archived_reports`: Query archived reports
+- `cleanup_old_reports`: Permanently delete old archives
+- `get_storage_stats`: Get storage usage statistics
 
 ## Testing
 

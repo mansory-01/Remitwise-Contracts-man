@@ -101,6 +101,8 @@ Instance Storage:
 Instance Storage:
 ├── BILLS: Map<u32, Bill>
 ├── NEXT_ID: u32
+├── ARCH_BILL: Map<u32, ArchivedBill>
+├── STOR_STAT: StorageStats
 ```
 
 **Relationships:**
@@ -126,6 +128,8 @@ Instance Storage:
 Instance Storage:
 ├── POLICIES: Map<u32, InsurancePolicy>
 ├── NEXT_ID: u32
+├── ARCH_POL: Map<u32, ArchivedPolicy>
+├── STOR_STAT: StorageStats
 ```
 
 **Relationships:**
@@ -151,6 +155,8 @@ Instance Storage:
 Instance Storage:
 ├── GOALS: Map<u32, SavingsGoal>
 ├── NEXT_ID: u32
+├── ARCH_GOAL: Map<u32, ArchivedGoal>
+├── STOR_STAT: StorageStats
 ```
 
 **Relationships:**
@@ -178,6 +184,8 @@ Instance Storage:
 ├── ADMIN: Address
 ├── ADDRS: ContractAddresses
 ├── REPORTS: Map<(Address, u64), FinancialHealthReport>
+├── ARCH_RPT: Map<(Address, u64), ArchivedReport>
+├── STOR_STAT: StorageStats
 ```
 
 **Relationships:**
@@ -314,6 +322,37 @@ User Action → Contract Function → State Change → Event Emission → Off-ch
 - **TTL Extension:** Prevents storage bloat
 - **Efficient Maps:** O(1) access patterns
 - **Minimal Data Duplication:** Shared storage keys
+- **Tiered TTL Strategy:** Active data (~30 days), archived data (~180 days)
+- **Data Archival:** Completed/inactive records moved to compressed archive storage
+- **Bulk Cleanup:** Functions to permanently delete old archives
+- **Storage Monitoring:** `StorageStats` struct tracks active/archived counts in all contracts
+
+### Data Archival System
+
+Each contract implements a comprehensive archival system:
+
+```
+Active Storage                    Archive Storage
+├── GOALS (Map<u32, SavingsGoal>)  → ARCH_GOAL (Map<u32, ArchivedGoal>)
+├── BILLS (Map<u32, Bill>)         → ARCH_BILL (Map<u32, ArchivedBill>)
+├── POLICIES (Map<u32, Policy>)    → ARCH_POL (Map<u32, ArchivedPolicy>)
+├── PEND_TXS (Map<u64, PendingTx>) → ARCH_TX (Map<u64, ArchivedTransaction>)
+└── REPORTS (Map<(Addr,u64), Rpt>) → ARCH_RPT (Map<(Addr,u64), ArchivedReport>)
+```
+
+**Archival Flow:**
+1. Archive functions move completed/inactive records to archive storage
+2. Archived records use compressed structs with essential fields only
+3. Archive storage uses longer TTL (6 months) for cost efficiency
+4. Cleanup functions permanently delete old archives when no longer needed
+5. Restore functions can move archived records back to active storage
+
+**Archived Data Compression:**
+- `ArchivedGoal`: Removes `locked`, `target_date` (no longer relevant)
+- `ArchivedBill`: Removes `due_date`, `recurring`, `frequency_days`, `created_at`
+- `ArchivedPolicy`: Removes `monthly_premium`, `coverage_amount`, `next_payment_date`
+- `ArchivedTransaction`: Stores only `tx_id`, `tx_type`, `proposer`, timestamps
+- `ArchivedReport`: Stores only `user`, `period_key`, `health_score`, timestamps
 
 ### Performance Patterns
 
