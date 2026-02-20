@@ -126,7 +126,10 @@
           "v0": {
             "topics": [
               {
-                "symbol": "log"
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "initialize_split"
               }
             ],
             "data": {

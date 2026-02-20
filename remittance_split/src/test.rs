@@ -62,7 +62,7 @@ fn test_initialize_split_invalid_sum() {
         &50, &50, &10, // Sums to 110
         &0,
     );
-    assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidPercentages)));
+    assert_eq!(result, Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100)));
 }
 
 #[test]
@@ -310,7 +310,7 @@ fn test_remittance_schedule_validation() {
     client.initialize_split(&owner, &0, &50, &30, &15, &5);
 
     let result = client.try_create_remittance_schedule(&owner, &10000, &3000, &86400);
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidDueDate)));
 }
 
 #[test]
@@ -326,5 +326,5 @@ fn test_remittance_schedule_zero_amount() {
     client.initialize_split(&owner, &0, &50, &30, &15, &5);
 
     let result = client.try_create_remittance_schedule(&owner, &0, &3000, &86400);
-    assert!(result.is_err());
+    assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidAmount)));
 }

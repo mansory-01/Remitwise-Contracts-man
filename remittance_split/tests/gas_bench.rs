@@ -59,7 +59,7 @@ fn bench_distribute_usdc_worst_case() {
 
     let nonce = 0u64;
     let (cpu, mem, distributed) = measure(&env, || {
-        client.distribute_usdc(&token_contract.address(), &payer, &0, &accounts, &amount)
+        client.distribute_usdc(&token_contract.address(), &payer, &nonce, &accounts, &amount)
     });
     assert!(distributed);
 
